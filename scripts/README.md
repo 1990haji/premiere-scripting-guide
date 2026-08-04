@@ -22,7 +22,7 @@ Premiere Pro の API** に基づく事実で、**After Effects の API は使用
 | 要件 | 可否 | 使用 API / 事実 | 根拠 |
 |---|---|---|---|
 | 編集点から左右のクリップを取得できるか | ✅ 可能 | `Track.clips` はトラック内 TrackItem の**時間順配列**。隣接 index が編集点の左右。 | `docs/sequence/track.md` |
-| 選択中の編集点を取得できるか | △ 間接的 | **「編集点」オブジェクトは存在しない**。`Sequence.getSelection()` は選択中の **TrackItem 配列**（時間順）を返す。選択クリップ＋`Track.clips`の順序から編集点を導出する。 | `docs/sequence/sequence.md` |
+| 選択中の編集点を取得できるか | △ 間接的 | **「編集点」オブジェクトは存在しない**。`Sequence.getSelection()` は選択中の **TrackItem 配列**を返す。→ **編集点の「左右2つのクリップ」を選択**し、その 2 クリップを (L, R) ペアとして扱う。 | `docs/sequence/sequence.md` |
 | 左右クリップのソース IN/OUT を取得できるか | ✅ 可能 | `TrackItem.inPoint` / `TrackItem.outPoint`（Time, **ソース基準**, read/write）。`TrackItem.start` / `end` は**シーケンス基準**。 | `docs/item/trackitem.md` |
 | ソースのタイムコードを取得できるか | ✅ 可能（相対）／⚠️ 一部制約 | ソース相対の秒/ticks は `inPoint/outPoint`（`Time.seconds`/`Time.ticks`）で取得可。表示用タイムコード文字列は `Time.getFormatted()`。**メディア埋め込みの絶対開始タイムコード（Start TC）を直接返す専用 API は無い**（XMP 経由の限定手段のみ）。本用途は IN/OUT 差分で判定できるため絶対 TC は不要。 | `docs/other/time.md`, `docs/item/projectitem.md` |
 | クリップ端をプログラムから延長できるか | △ 制約あり | `TrackItem.end` / `outPoint` は read/write だが、**「リップルトリムで延長」する専用 API は無い**。値の直接書き換えは隣接クリップを上書きする恐れがあり挙動保証が弱い。→ **代替として `Sequence.insertClip()` を採用**（下記）。 | `docs/item/trackitem.md` |
@@ -51,9 +51,9 @@ Premiere Pro の API** に基づく事実で、**After Effects の API は使用
 - **取得できる情報**: 選択中の `TrackItem`（`getSelection()`）、各トラックの `clips` 時間順配列。
 - **取得できない情報**: 「編集点」という単独オブジェクト、選択された編集点そのもの。
 - **理由**: スクリプティングモデルはクリップ（TrackItem）単位で、編集点はクリップ境界として暗黙的に表現される。
-- **代替案（採用）**: ユーザーが編集点の**左右いずれか／両方のクリップ**を選択 → `Track.clips` の
-  時間順から隣接ペア (L, R) を求め、`L.end == R.start`（隣接）かつ `L.projectItem == R.projectItem`
-  （同一ソース）で編集点を確定する。
+- **代替案（採用）**: ユーザーが編集点の**左右2つのクリップ**を選択 → 選択された 2 クリップを
+  start 順に並べて (L, R) ペアとし、`L.end == R.start`（隣接）かつ `L.projectItem == R.projectItem`
+  （同一ソース）で編集点を確定する。リンク A/V はビデオ2＋オーディオ2を選択すれば同期復元する。
 
 ### 制約 2: 「リップルトリムで端を延長」する専用 API が無い
 - **取得できる情報**: `start/end/inPoint/outPoint`（read/write）。
@@ -80,8 +80,8 @@ Premiere Pro の API** に基づく事実で、**After Effects の API は使用
 ## 3. 復元アルゴリズム
 
 1. `activeSequence.getSelection()` で選択クリップを取得（空なら中止）。
-2. 全トラックの `clips`（時間順）から、**片方でも選択されている**隣接ペア (L, R) で
-   **同一ソース**かつ**タイムライン隣接**のものを列挙。
+2. 選択された**2つのクリップ**をトラックごとに start 順で並べ、隣り合う (L, R) を
+   **同一ソース**かつ**タイムライン隣接**の条件でペア化。
 3. 検出した編集点（境界 `L.end` の ticks）が **1 箇所のみ**であることを確認（複数なら中止）。
 4. 各ペアの L/R について実行条件を検査:
    等速 `getSpeed()==1` / 非リバース / 非タイムリマップ / 非ネスト・非マルチカム・非統合・非調整レイヤー /
@@ -97,7 +97,7 @@ Premiere Pro の API** に基づく事実で、**After Effects の API は使用
 ## 4. 使い方
 
 1. Premiere Pro でシーケンスを開く。
-2. 復元したい編集点の**左右いずれか／両方のクリップ**を選択（リンク A/V はまとめて選択）。
+2. 復元したい編集点の**左右2つのクリップ**を選択（リンク A/V はビデオ2＋オーディオ2をまとめて選択）。
 3. スクリプトを実行:
    - `File > Scripts`（ExtendScript を実行できる環境）から `RestoreClipGap.jsx` を実行、または
    - CEP/UXP パネルや ExtendScript Toolkit / VS Code の ExtendScript 実行環境から評価。

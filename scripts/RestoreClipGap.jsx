@@ -40,7 +40,8 @@
  *
  * 既知の制約 / 代替（詳細は scripts/README.md）:
  *   - 「編集点」そのものを選択・取得する API は存在しない。getSelection() は
- *     TrackItem を返すため、選択クリップと Track.clips の時間順から編集点を導出する。
+ *     TrackItem を返すため、ユーザーが編集点の「左右2つのクリップ」を選択し、
+ *     その2クリップを (L,R) ペアとして扱う。
  *   - クリップ端を「リップルトリムで延長」する専用 API は無い。.end/.outPoint は
  *     read/write だが隣接を上書きし挙動保証が弱いため、本スクリプトは
  *     Sequence.insertClip()（欠落区間をソースから挿入し後続を右へリップル）で復元する。
@@ -166,53 +167,44 @@
     }
 
     // ---- 編集点（隣接ペア）検出 ---------------------------------------
-    // 選択クリップと Track.clips の時間順から、少なくとも一方が選択されている
-    // 隣接ペア (L,R) を探す。同一ソースかつタイムライン隣接のもののみ。
+    // 選択された「2つのクリップ」を編集点の左右 (L,R) として扱う。
+    // 選択クリップをトラックごと（parentTrackIndex + mediaType）にまとめ、
+    // 各トラック内で start 順に並べて隣り合う 2 クリップをペア化する。
+    //   - ビデオ 2 クリップだけ選択 → ビデオペア 1 組
+    //   - リンク A/V（ビデオ 2 + オーディオ 2）選択 → ビデオペア + オーディオペア
+    // ペアは「同一ソース」かつ「タイムライン隣接」のもののみ採用する。
     function findPairsFromSelection(seq, selection) {
-        // 選択クリップを nodeId+start で高速判定できるよう key 化
-        var selKeys = {};
+        // トラック単位でグループ化
+        var groups = {}; // key: mediaType + '#' + trackIndex
+        var order = [];
         for (var s = 0; s < selection.length; s++) {
             var c = selection[s];
-            selKeys[clipKey(c)] = true;
+            var mt = String(c.mediaType);
+            var ti;
+            try { ti = c.parentTrackIndex; } catch (e) { ti = -1; }
+            var key = mt + '#' + ti;
+            if (!groups[key]) { groups[key] = []; order.push(key); }
+            groups[key].push(c);
         }
 
         var pairs = [];
-        var allTracks = collectTracks(seq);
-        for (var t = 0; t < allTracks.length; t++) {
-            var track = allTracks[t].track;
-            var mediaType = allTracks[t].mediaType; // 'Video' | 'Audio'
-            var clips = track.clips;
-            for (var i = 0; i < clips.numItems - 1; i++) {
-                var L = clips[i], R = clips[i + 1];
-                var oneSelected = selKeys[clipKey(L)] || selKeys[clipKey(R)];
-                if (!oneSelected) { continue; }
+        for (var k = 0; k < order.length; k++) {
+            var arr = groups[order[k]];
+            // start 順にソート
+            arr.sort(function (a, b) { return ticksOf(a.start) - ticksOf(b.start); });
+            var mediaType = (String(arr[0].mediaType) === '2') ? 'Audio' : 'Video';
+            // 隣り合う 2 クリップをペア化
+            for (var i = 0; i < arr.length - 1; i++) {
+                var L = arr[i], R = arr[i + 1];
                 if (!sameSource(L, R)) { continue; }
                 if (!timelineAdjacent(seq, L, R)) { continue; }
                 pairs.push({
-                    L: L, R: R, track: track, mediaType: mediaType,
+                    L: L, R: R, mediaType: mediaType,
                     boundaryTicks: ticksOf(L.end)
                 });
             }
         }
         return pairs;
-    }
-
-    function clipKey(clip) {
-        var nid = '';
-        try { nid = String(clip.projectItem.nodeId); } catch (e) {}
-        return nid + '@' + String(clip.start.ticks) + '#' + String(clip.mediaType);
-    }
-
-    function collectTracks(seq) {
-        var out = [];
-        var i;
-        for (i = 0; i < seq.videoTracks.numTracks; i++) {
-            out.push({ track: seq.videoTracks[i], mediaType: 'Video' });
-        }
-        for (i = 0; i < seq.audioTracks.numTracks; i++) {
-            out.push({ track: seq.audioTracks[i], mediaType: 'Audio' });
-        }
-        return out;
     }
 
     function timelineAdjacent(seq, L, R) {
@@ -236,16 +228,20 @@
 
         var selection = seq.getSelection();
         if (!selection || !selection.length) {
-            log('クリップ（編集点の左右）が選択されていません。');
-            log('復元したい編集点の左右いずれか、または両方のクリップを選択してから実行してください。');
+            log('クリップが選択されていません。');
+            log('復元したい編集点の「左右2つのクリップ」を選択してから実行してください。');
+            log('（リンクした音声も復元する場合は、音声側の左右クリップも一緒に選択）');
             return flush('復元スクリプト');
         }
 
-        // 1) 選択から隣接ペアを検出
+        // 1) 選択された左右2クリップからペアを検出
         var pairs = findPairsFromSelection(seq, selection);
         if (!pairs.length) {
-            log('同一ソースで隣接している編集点が選択内に見つかりません。');
-            log('・左右のクリップが同一ソースか / タイムライン上で隣接しているかを確認してください。');
+            log('編集点として使える「隣接する2クリップ」が選択内に見つかりません。');
+            log('確認してください:');
+            log('  ・同じトラック上で「左右2つのクリップ」を選択しているか');
+            log('  ・その2クリップが同一ソース（同じ素材）か');
+            log('  ・2クリップがタイムライン上で隣接（間に隙間がない）しているか');
             return flush('復元スクリプト');
         }
 
@@ -259,7 +255,7 @@
         }
         if (boundaryList.length !== 1) {
             log('複数の編集点が選択されています（' + boundaryList.length + '箇所）。');
-            log('1つの編集点だけを選択して実行してください。');
+            log('編集点の左右2クリップ（＋リンク音声の2クリップ）だけを選択して実行してください。');
             return flush('復元スクリプト');
         }
         var groupPairs = boundarySet[boundaryList[0]];
